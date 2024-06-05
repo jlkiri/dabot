@@ -1,0 +1,15 @@
+# fly.toml app configuration file generated for telegram-dabot on 2024-06-05T01:02:47+09:00
+#
+# See https://fly.io/docs/reference/configuration/ for information about how to use this file.
+#
+
+app = 'telegram-dabot'
+primary_region = 'nrt'
+
+[build]
+
+[env]
+  PORT = '8080'
+
+[[vm]]
+  size = 'shared-cpu-1x'
