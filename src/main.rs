@@ -15,54 +15,45 @@ use tokio::sync::Mutex;
 
 const PROMPT: &str = "You are participating in a Telegram group chat conversation. The conversation is casual.\
 Everyone speaks Russian and you are expected to speak Russian as well. You need to support the conversation by replying with your opinion or maybe a joke.\
-Act natural, match the style of the conversation, like punctuation, capitalization, and emojis. Use emojis a lot. Be very short but to the point. Appear as if you know \
-a lot about the topic.";
+Act natural, match the style of the conversation, like punctuation, capitalization, and emojis. Be very short but to the point. If you think your message is short \
+make it even shorter but still useful. Appear as if you know \
+a lot about the topic. Reply with лол when the last messages are funny. Use swear words like сука or блять where appropriate.";
 
 async fn request_completion(
     cli: Client<OpenAIConfig>,
-    conv: Arc<Mutex<Conversation>>,
+    conv: &VecDeque<String>,
 ) -> Result<String, OpenAIError> {
-    let mut conversation = conv.lock().await;
+    let mut messages = conv
+        .iter()
+        .map(|msg| {
+            ChatCompletionRequestUserMessageArgs::default()
+                .content(msg.as_ref())
+                .build()
+                .map(|msg| msg.into())
+        })
+        .collect::<Result<VecDeque<ChatCompletionRequestMessage>, OpenAIError>>()?;
 
-    if conversation.msgs_since_last_reply >= 3 {
-        conversation.messages.pop_front();
-        conversation.msgs_since_last_reply = 0;
+    messages.push_front(
+        ChatCompletionRequestSystemMessageArgs::default()
+            .content(PROMPT)
+            .build()?
+            .into(),
+    );
 
-        let mut messages = conversation
-            .messages
-            .iter()
-            .map(|msg| {
-                ChatCompletionRequestUserMessageArgs::default()
-                    .content(msg.as_ref())
-                    .build()
-                    .map(|msg| msg.into())
-            })
-            .collect::<Result<VecDeque<ChatCompletionRequestMessage>, OpenAIError>>()?;
+    let request = CreateChatCompletionRequestArgs::default()
+        .max_tokens(512u16)
+        .model("gpt-4o")
+        .messages(messages)
+        .build()?;
 
-        messages.push_front(
-            ChatCompletionRequestSystemMessageArgs::default()
-                .content(PROMPT)
-                .build()?
-                .into(),
-        );
+    let response = cli.chat().create(request).await?;
+    let message = response
+        .choices
+        .first()
+        .map(|choice| choice.message.content.clone().unwrap_or_default())
+        .unwrap_or_default();
 
-        let request = CreateChatCompletionRequestArgs::default()
-            .max_tokens(512u16)
-            .model("gpt-4o")
-            .messages(messages)
-            .build()?;
-
-        let response = cli.chat().create(request).await?;
-        let message = response
-            .choices
-            .first()
-            .map(|choice| choice.message.content.clone().unwrap_or_default())
-            .unwrap_or_default();
-
-        return Ok(message);
-    }
-
-    Ok("".to_string())
+    Ok(message)
 }
 
 struct Conversation {
@@ -87,20 +78,35 @@ async fn main() {
         let client = client.clone();
 
         async move {
-            {
+            let completion = {
+                let mut completion = None;
                 let mut conversation = conversation.lock().await;
                 conversation
                     .messages
                     .push_back(msg.text().unwrap_or_default().to_string());
 
-                conversation.msgs_since_last_reply += 1;
-            }
+                if conversation.messages.len() > 3 {
+                    conversation.messages.pop_front();
+                }
 
-            let completion = request_completion(client, conversation)
-                .await
-                .expect("Completion went wrong");
+                let threshold = rand::random::<f64>();
+                if threshold >= 0.5
+                    || conversation
+                        .messages
+                        .back()
+                        .cloned()
+                        .unwrap_or_default()
+                        .contains("@rhymedabot")
+                {
+                    if let Ok(comp) = request_completion(client, &conversation.messages).await {
+                        completion = Some(comp);
+                    }
+                }
 
-            if !completion.is_empty() {
+                completion
+            };
+
+            if let Some(completion) = completion {
                 bot.send_message(msg.chat.id, completion).await?;
             }
 
