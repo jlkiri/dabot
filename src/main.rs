@@ -4,19 +4,18 @@ use async_openai::{
     config::OpenAIConfig,
     error::OpenAIError,
     types::{
-        ChatCompletionRequestAssistantMessageArgs, ChatCompletionRequestMessage,
-        ChatCompletionRequestSystemMessageArgs, ChatCompletionRequestUserMessageArgs,
-        CreateChatCompletionRequestArgs,
+        ChatCompletionRequestMessage, ChatCompletionRequestSystemMessageArgs,
+        ChatCompletionRequestUserMessageArgs, CreateChatCompletionRequestArgs,
     },
     Client,
 };
-use teloxide::{dispatching::dialogue::GetChatId, prelude::*};
+use teloxide::prelude::*;
 use tokio::sync::Mutex;
 
 const PROMPT: &str = "You are a member of a Telegram group chat between friends. The conversation is casual. \
 Everyone speaks Russian and you are expected to speak Russian too. You need to support the conversation by replying with your opinion. Joke sometimes. Use slang. \
 Act natural, match the style of the conversation, like punctuation, capitalization, and emojis. Be very short but to the point. Make it no longer than 3 sentences. Appear as if you know \
-a lot about the topic. Use Russian swear words like сука or блять where appropriate, when you're disappointed.";
+a lot about the topic. Pretend to be an expert. Use Russian swear words like сука or блять where appropriate, when you're disappointed.";
 
 async fn request_completion(
     cli: Client<OpenAIConfig>,
@@ -55,9 +54,10 @@ async fn request_completion(
     Ok(message)
 }
 
+const CAPACITY: usize = 5;
+
 struct Conversation {
     messages: VecDeque<String>,
-    msgs_since_last_reply: u8,
 }
 
 #[tokio::main]
@@ -67,8 +67,7 @@ async fn main() {
 
     let bot = Bot::from_env();
     let conversation = Arc::new(Mutex::new(Conversation {
-        messages: VecDeque::with_capacity(3),
-        msgs_since_last_reply: 0,
+        messages: VecDeque::with_capacity(CAPACITY),
     }));
     let client = Client::new();
 
@@ -77,38 +76,37 @@ async fn main() {
         let client = client.clone();
 
         async move {
+            let me = bot.get_me().await?;
+
             let completion = {
-                let mut completion = None;
                 let mut conversation = conversation.lock().await;
                 conversation
                     .messages
                     .push_back(msg.text().unwrap_or_default().to_string());
 
-                if conversation.messages.len() > 3 {
+                if conversation.messages.len() > CAPACITY {
                     conversation.messages.pop_front();
                 }
 
-                let threshold = rand::random::<f64>();
-                if threshold >= 0.5
-                    || conversation
-                        .messages
-                        .back()
-                        .cloned()
-                        .unwrap_or_default()
-                        .contains("@rhymedabot")
+                if conversation
+                    .messages
+                    .back()
+                    .map(|msg| msg.contains(&me.mention()))
+                    .unwrap_or_default()
                 {
-                    if let Ok(comp) = request_completion(client, &conversation.messages).await {
-                        completion = Some(comp);
-                    }
+                    request_completion(client, &conversation.messages)
+                        .await
+                        .ok()
+                } else {
+                    None
                 }
-
-                completion
             };
 
-            if let Some(completion) = completion {
-                bot.send_message(msg.chat.id, completion).await?;
-            }
+            let Some(completion) = completion else {
+                return Ok(());
+            };
 
+            bot.send_message(msg.chat.id, completion).await?;
             Ok(())
         }
     })
